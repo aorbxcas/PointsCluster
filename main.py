@@ -5,6 +5,7 @@
 import numpy as np
 from sklearn.neighbors import KDTree
 import open3d as o3d
+# import pcl
 
 
 # region 点云数据读取
@@ -337,6 +338,73 @@ def ransac_planar_and_curved_clustering_main(points, distance_threshold=0.05):
 
 # endregion
 
+# region PCL边缘检测
+
+
+
+def points_to_pcl(point_list):
+    """
+    将自定义 Point 对象列表转换为 pcl.PointCloud 实例
+    :param point_list: list of `Point`
+    :return: pcl.PointCloud
+    """
+    points_array = np.array([[p.x, p.y, p.z] for p in point_list], dtype=np.float32)
+    cloud = pcl.PointCloud()
+    cloud.from_array(points_array)
+    return cloud
+
+def detect_boundaries_with_pcl(cloud, radius=0.5, angle_threshold=0.7):
+    """
+    使用 PCL 进行边界检测
+    :param cloud: pcl.PointCloud
+    :param radius: 邻域搜索半径
+    :param angle_threshold: 判断边界的阈值 (0~1)
+    :return: 边界点索引列表
+    """
+    # 法向量估计
+    ne = cloud.make_NormalEstimation()
+    tree = cloud.make_kdtree()
+    ne.set_SearchMethod(tree)
+    ne.set_RadiusSearch(radius)  # 设置邻域搜索半径
+    normals = ne.compute()
+
+    # 边界检测
+    boundary = cloud.make_BoundaryEstimation()
+    boundary.set_InputNormals(normals)
+    boundary.set_AngleThreshold(angle_threshold)
+    boundaries = boundary.get_boundaries()  # 返回布尔数组：True 表示是边界点
+
+    boundary_indices = [i for i, is_boundary in enumerate(boundaries) if is_boundary]
+    return boundary_indices
+
+def visualize_boundaries(original_points, boundary_indices):
+    """
+    将边界点染成红色并可视化
+    :param original_points: 原始 Point 对象列表
+    :param boundary_indices: 边界点索引列表
+    """
+    colored_points = [
+        Point(p.x, p.y, p.z, p.r, p.g, p.b,
+              p.classification, p.return_number, p.number_of_returns, p.z_duplicate)
+        for p in original_points
+    ]
+
+    for idx in boundary_indices:
+        if 0 <= idx < len(colored_points):
+            colored_points[idx].r, colored_points[idx].g, colored_points[idx].b = 0, 255, 0  # 红色
+
+
+def pcl_edge_detection_main(file_path):
+    points = parse_points(file_path)  # 读取所有点
+    cloud = points_to_pcl(points)     # 转换为 PCL 格式
+    boundary_indices = detect_boundaries_with_pcl(cloud, radius=0.5, angle_threshold=0.7)
+
+    print(f"检测到 {len(boundary_indices)} 个边界点")
+    visualize_boundaries(points, boundary_indices)
+    visualize_points_open3d(points)
+
+# endregion
+
 # 准确率、耗时等数据DebugLog、可行性
 
 
@@ -344,14 +412,17 @@ if __name__ == "__main__":
     file_path = "points.txt"  # 假设文本文件名为points.txt
     # 原图像
     points = parse_points(file_path, 0)
-    visualize_points_open3d(points)
 
+    pcl_edge_detection_main(file_path)
 
-    # 区域生长算法主函数
-    points_region = parse_points(file_path, 100)
-    region_growing_main(points_region)
-
-    # 随机采样拟合主函数
-    points_cluster = parse_points(file_path, 5)
-    ransac_planar_and_curved_clustering_main(points_cluster,0.5)
+    # visualize_points_open3d(points)
+    #
+    #
+    # # 区域生长算法主函数
+    # points_region = parse_points(file_path, 100)
+    # region_growing_main(points_region)
+    #
+    # # 随机采样拟合主函数
+    # points_cluster = parse_points(file_path, 5)
+    # ransac_planar_and_curved_clustering_main(points_cluster,0.5)
 
