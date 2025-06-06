@@ -22,6 +22,7 @@ class Point:
         self.return_number = return_number
         self.number_of_returns = number_of_returns
         self.z_duplicate = z_duplicate
+        self.label = 0
 
     def __repr__(self):
         return (f"Point(x={self.x}, y={self.y}, z={self.z}, r={self.r}, "
@@ -324,8 +325,10 @@ def ransac_planar_and_curved_clustering_main(points, distance_threshold=0.05):
     # Step 3: 设置颜色
     for point in planar_points:
         point.r, point.g, point.b = 255, 0, 0  # 红色 - 平面结构
+        point.label = 1
     for point in curved_surface_points:
         point.r, point.g, point.b = 0, 0, 255  # 蓝色 - 曲面结构
+        point.label = 2
 
     # Step 4: 合并并可视化
     all_colored_points = planar_points + curved_surface_points
@@ -340,41 +343,49 @@ def ransac_planar_and_curved_clustering_main(points, distance_threshold=0.05):
 
 # region PCL边缘检测
 
-
-
-def points_to_pcl(point_list):
+def points_to_open3d(point_list):
     """
-    将自定义 Point 对象列表转换为 pcl.PointCloud 实例
+    将自定义 Point 对象列表转换为 open3d.geometry.PointCloud 实例
     :param point_list: list of `Point`
-    :return: pcl.PointCloud
+    :return: open3d.geometry.PointCloud
     """
-    points_array = np.array([[p.x, p.y, p.z] for p in point_list], dtype=np.float32)
-    cloud = pcl.PointCloud()
-    cloud.from_array(points_array)
+    points_array = np.array([[p.x, p.y, p.z] for p in point_list])
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points_array)
     return cloud
 
-def detect_boundaries_with_pcl(cloud, radius=0.5, angle_threshold=0.7):
+
+def detect_boundaries_with_open3d(cloud, radius=0.5, angle_threshold=0.7):
     """
-    使用 PCL 进行边界检测
-    :param cloud: pcl.PointCloud
+    使用 Open3D 进行边界点检测
+    :param cloud: open3d.geometry.PointCloud
     :param radius: 邻域搜索半径
-    :param angle_threshold: 判断边界的阈值 (0~1)
+    :param angle_threshold: 法线方向差异阈值 (0~1)
     :return: 边界点索引列表
     """
-    # 法向量估计
-    ne = cloud.make_NormalEstimation()
-    tree = cloud.make_kdtree()
-    ne.set_SearchMethod(tree)
-    ne.set_RadiusSearch(radius)  # 设置邻域搜索半径
-    normals = ne.compute()
+    # 计算法向量
+    cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30))
 
-    # 边界检测
-    boundary = cloud.make_BoundaryEstimation()
-    boundary.set_InputNormals(normals)
-    boundary.set_AngleThreshold(angle_threshold)
-    boundaries = boundary.get_boundaries()  # 返回布尔数组：True 表示是边界点
+    # 构建 KDTree 用于邻域查询
+    kdtree = o3d.geometry.KDTreeFlann(cloud)
 
-    boundary_indices = [i for i, is_boundary in enumerate(boundaries) if is_boundary]
+    boundary_indices = []
+    normals = np.asarray(cloud.normals)
+
+    for i in range(len(cloud.points)):
+        _, idxs, _ = kdtree.search_radius_vector_3d(cloud.points[i], radius)
+        if len(idxs) < 3:
+            continue
+
+        # 计算当前点与邻域点的法线夹角
+        current_normal = normals[i]
+        angles = [abs(np.dot(current_normal, normals[j])) for j in idxs if j != i]
+
+        # 如果平均角度小于阈值，则认为是边界点
+        avg_angle = np.mean(angles)
+        if avg_angle < angle_threshold:
+            boundary_indices.append(i)
+
     return boundary_indices
 
 def visualize_boundaries(original_points, boundary_indices):
@@ -388,20 +399,136 @@ def visualize_boundaries(original_points, boundary_indices):
               p.classification, p.return_number, p.number_of_returns, p.z_duplicate)
         for p in original_points
     ]
-
+    for point in colored_points:
+        point.r = 0
+        point.g = 0
+        point.b = 0
     for idx in boundary_indices:
         if 0 <= idx < len(colored_points):
             colored_points[idx].r, colored_points[idx].g, colored_points[idx].b = 0, 255, 0  # 红色
+    return colored_points
 
-
-def pcl_edge_detection_main(file_path):
-    points = parse_points(file_path)  # 读取所有点
-    cloud = points_to_pcl(points)     # 转换为 PCL 格式
-    boundary_indices = detect_boundaries_with_pcl(cloud, radius=0.5, angle_threshold=0.7)
+def open3d_edge_detection_main(points):
+    cloud = points_to_open3d(points)  # 转换为 Open3D 格式
+    boundary_indices = detect_boundaries_with_open3d(cloud, radius=1, angle_threshold=0.7)
 
     print(f"检测到 {len(boundary_indices)} 个边界点")
-    visualize_boundaries(points, boundary_indices)
+    points = visualize_boundaries(points, boundary_indices)
     visualize_points_open3d(points)
+
+def open3d_self_edge_detection_main(points):
+    cloud = points_to_open3d(points)  # 转换为 Open3D 格式
+    downsampled_cloud = cloud.voxel_down_sample(voxel_size=0.5)
+    downsampled_cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
+    normals = np.asarray(downsampled_cloud.normals)
+    normal_variations = np.linalg.norm(normals - np.mean(normals,axis = 0),axis= 1)
+    boundary_threshold = 0
+    boundary_points = downsampled_cloud.select_by_index(np.where(normal_variations>boundary_threshold)[0])
+    print(f"检测到 {len(boundary_points.points)} 个边界点")
+    o3d.visualization.draw_geometries([boundary_points])
+
+import numpy as np
+from scipy.spatial import ConvexHull, Delaunay
+from collections import defaultdict
+
+
+def alpha_shape(points, alpha):
+    """
+    使用 Alpha Shape 算法提取二维或三维点集的边界
+    :param points: 点列表 (支持 [Point] 类型)
+    :param alpha: 控制形状紧密程度的参数
+    :return: 边界面片索引列表 (可用于可视化)
+    """
+
+    # 提取坐标数组
+    points_array = np.array([[p.x, p.y, p.z] for p in points])
+
+    # 构建 Delaunay 三角剖分
+    tetra = Delaunay(points_array)
+
+    # 存储每条边对应的两个三角面索引
+    edge_map = defaultdict(list)
+
+    # 遍历所有四面体（三维）的三角面
+    faces = []
+    for t in tetra.simplices:
+        # 四面体的四个三角面
+        face_indices = [
+            (t[0], t[1], t[2]),
+            (t[0], t[1], t[3]),
+            (t[0], t[2], t[3]),
+            (t[1], t[2], t[3]),
+        ]
+        for face in face_indices:
+            sorted_face = tuple(sorted(face))
+            edge_map[sorted_face].append(t)
+
+    # 计算每个面是否属于边界：只被一个四面体共享，并且圆半径小于 alpha
+    boundary_faces = []
+
+    for face, tetras in edge_map.items():
+        if len(tetras) == 1:
+            # 只有一个四面体包含该面 -> 边界面
+            boundary_faces.append(face)
+
+    return boundary_faces
+
+
+def visualize_alpha_shape_boundary(points, boundary_faces):
+    """
+    可视化 Alpha Shape 提取的边界
+    :param points: Point 对象列表
+    :param boundary_faces: 由 alpha_shape 返回的边界三角面列表
+    """
+    points_array = np.array([[p.x, p.y, p.z] for p in points])
+    colors = np.zeros_like(points_array)
+    colors[:, 1] = 255  # 设置为绿色
+
+    point_cloud = o3d.geometry.PointCloud()
+    point_cloud.points = o3d.utility.Vector3dVector(points_array)
+    point_cloud.colors = o3d.utility.Vector3dVector(colors / 255.0)
+
+    # 创建三角网格表示边界
+    triangles = np.array(boundary_faces)
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(points_array)
+    mesh.triangles = o3d.utility.Vector3iVector(triangles)
+
+    # 设置颜色
+    mesh.paint_uniform_color([0, 1, 0])  # 绿色边界
+
+    # 可视化
+    o3d.visualization.draw_geometries([mesh, point_cloud], window_name="Alpha Shape 边界提取")
+
+def visualize_alpha_shape_boundary_only_points(points, boundary_faces):
+    """
+    可视化 Alpha Shape 提取的边界点，不显示三角面
+    :param points: Point 对象列表
+    :param boundary_faces: 由 alpha_shape 返回的边界三角面列表
+    """
+    # 提取坐标数组
+    points_array = np.array([[p.x, p.y, p.z] for p in points])
+
+    # 找出所有出现在边界面上的点索引（去重）
+    boundary_point_indices = set()
+    for face in boundary_faces:
+        for idx in face:
+            boundary_point_indices.add(idx)
+
+    boundary_point_indices = list(boundary_point_indices)
+
+    # 创建点云对象
+    point_cloud = o3d.geometry.PointCloud()
+    point_cloud.points = o3d.utility.Vector3dVector(points_array)
+
+    # 设置颜色：所有点为灰色，边界点为绿色
+    colors = np.array([[0.0, 0.0, 0.0]] * len(points_array))  # 默认灰色
+    colors[boundary_point_indices] = [1, 0, 0]  # 边界点设为绿色
+
+    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+    # 打开交互式窗口查看结果
+    o3d.visualization.draw_geometries([point_cloud], window_name="Alpha Shape 边界点提取（仅点）")
 
 # endregion
 
@@ -411,9 +538,27 @@ def pcl_edge_detection_main(file_path):
 if __name__ == "__main__":
     file_path = "points.txt"  # 假设文本文件名为points.txt
     # 原图像
-    points = parse_points(file_path, 0)
+    points = parse_points(file_path, 10)
 
-    pcl_edge_detection_main(file_path)
+    # open3d_self_edge_detection_main(points)
+
+    # 提取 Alpha Shape 边界
+    boundary_faces = alpha_shape(points, alpha=1.0)
+
+    print(f"检测到 {len(boundary_faces)} 个边界三角面")
+
+    # 可视化结果
+    visualize_alpha_shape_boundary_only_points(points, boundary_faces)
+
+
+
+
+
+    # open3d_edge_detection_main(points)
+
+
+
+    # boundary_main(points)
 
     # visualize_points_open3d(points)
     #
