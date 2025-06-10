@@ -3,6 +3,7 @@ import time
 import numpy as np
 import open3d as o3d
 from sklearn.neighbors import KDTree
+import matplotlib.pyplot as plt
 
 
 # region 点云数据读取
@@ -400,7 +401,7 @@ def draw_point_cloud_with_normals(cloud, scale=0.1):
 
 def detect_boundaries_with_open3d(cloud, radius, angle_threshold):
     # 计算法向量
-    cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30))
+    cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=100))
     cloud.orient_normals_to_align_with_direction(
         orientation_reference=np.array([0, 0, 1])  # 注意参数名是 orientation_reference
     )
@@ -422,7 +423,8 @@ def detect_boundaries_with_open3d(cloud, radius, angle_threshold):
 
         avg_angle = np.mean(angles)
         # 判断是否存在明显差异的邻域点
-        if any(angle < angle_threshold for angle in angles):
+        avg_angle = np.mean(angles)
+        if avg_angle < angle_threshold:
             boundary_indices.append(i)
 
     print(f"共检测到 {len(boundary_indices)} 个边界点")
@@ -571,6 +573,83 @@ def visualize_alpha_shape_boundary_only_points(points, boundary_point_indices):
 
 # endregion
 
+# region 经纬线扫描法（2D）
+
+def load_point_cloud(file_path):
+    point_cloud = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            parts = line.strip().split()
+            if len(parts) >= 10:
+                try:
+                    x = float(parts[0])
+                    y = float(parts[1])
+                    z = float(parts[2])
+                    r = int(parts[3])
+                    g = int(parts[4])
+                    b = int(parts[5])
+                    classification = int(parts[6])
+                    return_number = int(parts[7])
+                    number_of_returns = int(parts[8])
+                    z_duplicate = float(parts[9])
+                    point = Point(x, y, z, r, g, b, classification, return_number, number_of_returns, z_duplicate)
+                    point_cloud.append(point)
+                except ValueError:
+                    print(f"Error parsing line: {line}")
+    return point_cloud
+
+def find_point_cloud_boundary(point_cloud, interval=0.1):
+    x_coords = [point.x for point in point_cloud]
+    y_coords = [point.y for point in point_cloud]
+    z_coords = [point.z for point in point_cloud]
+
+    min_x, max_x = min(x_coords), max(x_coords)
+    min_y, max_y = min(y_coords), max(y_coords)
+    min_z, max_z = min(z_coords), max(z_coords)
+
+    x_intervals = np.arange(min_x, max_x + interval, interval)
+    y_intervals = np.arange(min_y, max_y + interval, interval)
+    z_intervals = np.arange(min_z, max_z + interval, interval)
+
+    boundary_points = []
+
+    for x in x_intervals:
+        points_at_x = [point for point in point_cloud if abs(point.x - x) < interval / 2]
+        if points_at_x:
+            min_y_point = min(points_at_x, key=lambda p: p.y)
+            max_y_point = max(points_at_x, key=lambda p: p.y)
+            boundary_points.append((min_y_point.x, min_y_point.y))
+            boundary_points.append((max_y_point.x, max_y_point.y))
+
+    for y in y_intervals:
+        points_at_y = [point for point in point_cloud if abs(point.y - y) < interval / 2]
+        if points_at_y:
+            min_x_point = min(points_at_y, key=lambda p: p.x)
+            max_x_point = max(points_at_y, key=lambda p: p.x)
+            boundary_points.append((min_x_point.x, min_x_point.y))
+            boundary_points.append((max_x_point.x, max_x_point.y))
+
+    boundary_points = list(set(boundary_points))  # Remove duplicates
+
+    return boundary_points
+
+def visualize_point_cloud_and_boundary(point_cloud, boundary_points):
+    x_coords = [point.x for point in point_cloud]
+    y_coords = [point.y for point in point_cloud]
+    boundary_x = [point[0] for point in boundary_points]
+    boundary_y = [point[1] for point in boundary_points]
+
+    plt.figure(figsize=(10, 8))
+    plt.scatter(x_coords, y_coords, c='blue', s=1, label='Point Cloud')
+    plt.scatter(boundary_x, boundary_y, c='red', s=20, label='Boundary Points')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.title('Point Cloud and Boundary')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# endregion
 
 if __name__ == "__main__":
 
@@ -600,20 +679,21 @@ if __name__ == "__main__":
     print("点云分割完成，耗时：", time_cut)
 
     # region 法向量边界检测
-    # 检测边界点
-    # boundary_indices = detect_boundaries_with_open3d(cloud, radius=1, angle_threshold=0.65)
+    # # 检测边界点
+    # boundary_indices = detect_boundaries_with_open3d(cloud, radius=2.0, angle_threshold=0.8)
     # # 高亮显示边界点
     # visualize_boundary_points(cloud, boundary_indices)
     # endregion
 
     # region alphaShape边界检测
-    boundary_faces = alpha_shape(points_cluster_1, alpha=100.0)
-    print(f"检测到 {len(boundary_faces)} 个边界三角面")
-    visualize_alpha_shape_boundary_only_points(points_cluster_1, boundary_faces)
+    # boundary_faces = alpha_shape(points_cluster_1, alpha=100.0)
+    # print(f"检测到 {len(boundary_faces)} 个边界三角面")
+    # visualize_alpha_shape_boundary_only_points(points_cluster_1, boundary_faces)
     # endregion
 
     # region 经纬线、投影边界检测
-
+    boundary_points = find_point_cloud_boundary(points_cluster_1, interval=0.1)
+    visualize_point_cloud_and_boundary(points_cluster_1, boundary_points)
     # endregion
 
     time_boundary = time.time() - time_cut - start_time
